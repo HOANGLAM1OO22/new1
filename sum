@@ -1,0 +1,160 @@
+Below is a **concise, structured issue report in English**, suitable for **Jira / internal technical documentation**.
+
+---
+
+# 📋 MotionScrap – Issue Summary & Resolution Report
+
+## 1. Missing segments during merge in parallel execution
+
+**Symptom**
+Some input files were missing in the final output when reuse, transcoding, and transition tasks ran in parallel, despite `onTranscodingComplete` being logged.
+
+**Root Cause**
+Merge logic depended on `bufferChannels.isEmpty()` to distinguish reuse vs. produced content, causing duplicated merges or skipped files under parallel execution.
+
+**Resolution**
+
+* Unified all merge paths through `VideoTransferringTask`
+* Removed conditional merge logic based on `bufferChannels.isEmpty()`
+* Ensured all tasks go through `writeTrack(numChannel, source, channels)`
+
+---
+
+## 2. Transition tasks not executed (`transitionTasks.size = 0`)
+
+**Symptom**
+Transition tasks were created in `prepareTransitionTasks()` but never executed.
+
+**Root Cause**
+A local variable shadowed the member variable `transitionTasks`, leaving the actual task list empty.
+
+**Resolution**
+Explicitly populated the class member list using `this.transitionTasks.addAll(...)` and avoided name shadowing.
+
+---
+
+## 3. Only one video and one audio frame written during transfer
+
+**Symptom**
+Output contained only a single frame per track, although producers logged that all buffers were sent.
+
+**Root Cause**
+The consumer logic inferred end-of-stream (EOS) using timestamps and exited early.
+
+**Resolution**
+
+* Removed timestamp-based termination
+* Terminated stream consumption **only** on `BUFFER_FLAG_END_OF_STREAM`
+
+---
+
+## 4. TransitionEncoder did not propagate EOS
+
+**Symptom**
+Transition frames were partially written or missing.
+
+**Root Cause**
+The EOS flag was explicitly cleared before pushing buffers into the channel.
+
+**Resolution**
+Preserved the EOS flag and emitted a dedicated EOS buffer (zero-size buffer with `BUFFER_FLAG_END_OF_STREAM`).
+
+---
+
+## 5. MediaTrackExtractor (audio/video reuse) did not send EOS
+
+**Symptom**
+Audio reuse tracks were truncated or incomplete.
+
+**Root Cause**
+The extractor loop exited on end-of-input without pushing an EOS buffer to the channel.
+
+**Resolution**
+Explicitly sent an EOS buffer after extractor completion.
+
+---
+
+## 6. Confusion between EOS and overlap trimming
+
+**Symptom**
+Streams were prematurely terminated when handling overlapped motion-photo segments.
+
+**Root Cause**
+Timestamp-based overlap logic was incorrectly used to terminate stream consumption.
+
+**Resolution**
+
+* EOS strictly defines **stream termination**
+* Overlap timestamps are used only to **skip frames**, never to terminate the stream
+
+---
+
+## 7. Output timeline drift and incorrect duration
+
+**Symptom**
+Final video duration and AV sync were incorrect.
+
+**Root Cause**
+Timeline advancement was based on logical cut boundaries (`getDistinctLastTimestampUs`) instead of actual written samples.
+
+**Resolution**
+Advanced the global timeline using the **actual written duration**:
+
+```kotlin
+durationUs = lastWrittenPtsUs - firstWrittenPtsUs
+lastTransferredTimestampUs += durationUs
+```
+
+---
+
+## 8. Severe video frame corruption (only small bottom-right area visible)
+
+**Symptom**
+Most video frames were corrupted, with only a small region in the bottom-right corner rendering correctly.
+
+**Root Cause**
+Image processing stage issues (crop/resize/stride or HardwareBuffer usage mismatch) in the decode → convert pipeline.
+
+**Resolution**
+
+* Dumped frames in `onDecodedImageAvailable()` to isolate decoder vs. converter
+* Validated image dimensions, crop rect, stride, and buffer usage
+* Tested bypassing the converter (COPY-only path)
+
+---
+
+## 9. Misinterpretation of frame dumps in `onDecodedImageAvailable()`
+
+**Symptom**
+Dumped frames were assumed to represent final transcoded output.
+
+**Clarification**
+Frames dumped in `onDecodedImageAvailable()` are:
+
+* Post-decoder
+* Post-GPU image processing
+* **Pre-encoder and pre-mux**
+
+**Resolution**
+Used these dumps only for debugging decode and image processing stages.
+
+---
+
+## 10. Overall Root Cause
+
+The issues stemmed from:
+
+* Lack of a strict EOS contract across producers
+* Mixing logical content boundaries with stream termination
+* Treating a streaming pipeline as if it were batch-based
+
+---
+
+## ✅ Final Conclusion
+
+> All issues originated from conflating stream-level EOS handling with content-level timestamp trimming.
+> After enforcing a strict EOS contract and advancing the timeline based on actual written samples, the MotionScrap pipeline became stable, correct, and AV-sync safe.
+
+---
+
+If needed, this can be further condensed into a **one-page RCA** or adapted directly for **Jira tickets**.
